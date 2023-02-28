@@ -27,13 +27,13 @@ import (
 	"time"
 
 	"github.com/golang/glog"
-
 	admissionv1 "k8s.io/api/admission/v1"
 	arv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 
@@ -276,7 +276,7 @@ func (wh *WebHook) serve(w http.ResponseWriter, r *http.Request) {
 	var reviewResponse *admissionv1.AdmissionResponse
 	switch review.Request.Resource {
 	case podResource:
-		reviewResponse, whErr = mutatePods(review, wh.lister, wh.sparkJobNamespace)
+		reviewResponse, whErr = mutatePods(review, wh.informerFactory, wh.lister, wh.sparkJobNamespace)
 	case sparkApplicationResource:
 		if !wh.enableResourceQuotaEnforcement {
 			unexpectedResourceType(w, review.Request.Resource.String())
@@ -536,10 +536,7 @@ func admitScheduledSparkApplications(review *admissionv1.AdmissionReview, enforc
 	return response, nil
 }
 
-func mutatePods(
-	review *admissionv1.AdmissionReview,
-	lister crdlisters.SparkApplicationLister,
-	sparkJobNs string) (*admissionv1.AdmissionResponse, error) {
+func mutatePods(review *admissionv1.AdmissionReview, factory crinformers.SharedInformerFactory, lister crdlisters.SparkApplicationLister, sparkJobNs string) (*admissionv1.AdmissionResponse, error) {
 	raw := review.Request.Object.Raw
 	pod := &corev1.Pod{}
 	if err := json.Unmarshal(raw, pod); err != nil {
@@ -560,7 +557,16 @@ func mutatePods(
 	}
 	app, err := lister.SparkApplications(review.Request.Namespace).Get(appName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get SparkApplication %s/%s: %v", review.Request.Namespace, appName, err)
+		if errors.IsNotFound(err) {
+			// Trying to wait for cache sync
+			glog.V(2).Infof("SparkApplication %s/%s is not found, trying to resync cache and reattempt", review.Request.Namespace, appName)
+			factory.WaitForCacheSync(wait.NeverStop)
+			glog.V(2).Infof("Cache resync is done, retrying")
+			app, err = lister.SparkApplications(review.Request.Namespace).Get(appName)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to get SparkApplication %s/%s: %v", review.Request.Namespace, appName, err)
+		}
 	}
 
 	patchOps := patchSparkPod(pod, app)
