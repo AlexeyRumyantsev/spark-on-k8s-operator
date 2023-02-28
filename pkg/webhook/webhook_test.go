@@ -75,7 +75,7 @@ func TestMutatePod(t *testing.T) {
 			Namespace: "default",
 		},
 	}
-	response, _ := mutatePods(review, nil, lister, "default")
+	response, _ := mutatePods(review, informerFactory, lister, "default")
 	assert.True(t, response.Allowed)
 
 	// 2. Test processing Spark pod with only one patch: adding an OwnerReference.
